@@ -1,0 +1,25 @@
+# 模型文件列表，每行一个文件名（可在主菜单「模型管理」里增删）
+standard_v9_final_red
+standard_v9_final_blue
+standard_v9_mixed_red
+standard_v9_mixed_blue
+standard_v8_final_red
+standard_v8_final_blue
+standard_v8_mixed_red
+standard_v8_mixed_blue
+standard_v7_final_red
+standard_v7_final_blue
+standard_v7_mixed_red
+standard_v7_mixed_blue
+standard_v6_final_red
+standard_v6_final_blue
+standard_v6_mixed_red
+standard_v6_mixed_blue
+standard_v5_final_red
+standard_v5_final_blue
+standard_v5_mixed_red
+standard_v5_mixed_blue
+standard_v4_final_red
+standard_v4_final_blue
+standard_v3_final_red
+standard_v3_final_blue

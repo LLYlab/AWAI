@@ -1,0 +1,18 @@
+# AWAI v3 运行依赖
+#
+# 安装（本机 `python` 是 Windows 商店占位符，请用 py 启动器）：
+#     py -3 -m pip install -r requirements.txt
+#
+# 版本为实测可用组合：Python 3.9.13 / pygame 2.6.1 / numpy 2.0.2 / torch 2.8.0。
+# 更低的版本号在 >= 之后的范围内也可运行。
+#
+# 关于 torch：训练（反向传播）需要 torch；而推理走的是 numpy 快速路径。
+#   - CPU 用户：直接 `pip install torch` 即可，下面这条就是 CPU 版。
+#   - 想用 CUDA：请按 https://pytorch.org/get-started/locally/ 的官方命令单独安装，
+#     例如本机实测可用的组合是 `torch==2.8.0` + cu128 索引。
+#
+# 注意：实测在本项目的小批量推理负载下 **GPU 反而更慢**（单次 CUDA kernel
+# 启动+同步固定开销约 3.3 ms，GPU 要到批量 >=1024 才反超），详见 README。
+pygame>=2.1
+numpy>=1.20
+torch>=1.10

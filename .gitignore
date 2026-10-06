@@ -1,0 +1,39 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 训练产物 / 生成物（可重新生成，不入库）----
+# 想保留某次报告就把它从这条规则里排除，或在 README 里说明
+AWAI/report/*.html
+AWAI/report/*.json
+
+# ---- 模型检查点：只分发「当前观测版本的最终模型」----
+# 本地 models/ 里还有 87 个检查点不随仓库分发：
+#   · 旧观测维度（obs_dim 95/98/99）的 cur4/cur6/cur7 系列 —— 当前代码加载会直接
+#     被中文诊断拒绝，分发出去只会让人踩坑；
+#   · 各课程的阶段中间检查点（S1~S8）与临时测试模型（_arena_test / _bench_tmp）。
+# 入库的白名单是：
+#   AWAI/models/standard_v{3..9}_final_{red,blue}.pt
+#   AWAI/models/standard_v{5..9}_mixed_{red,blue}.pt
+AWAI/models/*.pt
+!AWAI/models/standard_v[3-9]_final_*.pt
+!AWAI/models/standard_v[3-9]_mixed_*.pt
+
+# ---- IDE / 编辑器 ----
+.vs/
+.vscode/
+.idea/
+*.pyproj.user
+*.user
+
+# ---- 本机工具链的版本快照目录（LVAL 生成）----
+.lval-versions/
+
+# ---- 操作系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store
