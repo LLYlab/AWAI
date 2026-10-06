@@ -91,16 +91,16 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 MODELSET_FILE = os.path.join(BASE_DIR, "modelset.txt")
 
 pygame.init()
-try:
-    FONT = pygame.font.SysFont('simhei', 18)
-    BIG_FONT = pygame.font.SysFont('simhei', 26)
-    MENU_FONT = pygame.font.SysFont('simhei', 40)
-    SMALL_FONT = pygame.font.SysFont('simhei', 14)
-except Exception:
-    FONT = pygame.font.SysFont('Arial', 18)
-    BIG_FONT = pygame.font.SysFont('Arial', 26)
-    MENU_FONT = pygame.font.SysFont('Arial', 40)
-    SMALL_FONT = pygame.font.SysFont('Arial', 14)
+
+# 字体：优先带中文的 simhei，没有就退回 arial。
+# 这里用 match_font 明确判断，而不是 try/except 包 SysFont —— SysFont 找不到字体时
+# 只会**静默替换**成默认字体，永远不会抛异常，原来的 except 分支其实是死代码。
+FONT_NAME = 'simhei' if pygame.font.match_font('simhei') else 'arial'
+FONT_SIZE, BIG_SIZE, MENU_SIZE, SMALL_SIZE = 18, 26, 40, 14
+FONT = pygame.font.SysFont(FONT_NAME, FONT_SIZE)
+BIG_FONT = pygame.font.SysFont(FONT_NAME, BIG_SIZE)
+MENU_FONT = pygame.font.SysFont(FONT_NAME, MENU_SIZE)
+SMALL_FONT = pygame.font.SysFont(FONT_NAME, SMALL_SIZE)
 
 WHITE = (255, 255, 255); BLACK = (0, 0, 0); RED = (220, 50, 50); BLUE = (50, 50, 220)
 GREEN = (0, 200, 0); GRAY = (150, 150, 150); YELLOW = (255, 255, 0); ORANGE = (255, 150, 0)
@@ -3554,15 +3554,44 @@ class Minimap:
 
 
 class Button:
-    def __init__(self, x, y, w, h, text, color=GREEN, font=None):
+    """菜单按钮。
+
+    文字比按钮宽时**自动缩小字号**再居中，而不是溢出边框：原先的实现只是把文字
+    居中后直接 blit，不检查也不裁剪，导致主菜单上
+    「常规模式（手动 vs 规则AI）」比 300px 的按钮宽 38px、
+    「选择地图（8 种现实地形）」宽 12px，字都画到按钮外面去了。
+    """
+
+    PAD = 12          # 左右各留的余量（像素）
+
+    def __init__(self, x, y, w, h, text, color=GREEN, font=None, size=None):
         self.rect = pygame.Rect(x, y, w, h)
         self.text = text
         self.color = color
         self.font = font or BIG_FONT
+        self.size = BIG_SIZE if size is None else size
+        # 字号在构造时算一次就固定下来，避免每帧重新测量
+        self._font = self._fit_font()
+
+    def _fit_font(self):
+        """优先用调用方给的字号；装不下才逐级缩小（下限 10px）。
+
+        先直接量 `self.font`：装得下就原样返回，短标签（如模型管理的「删除」「返回」）
+        行为与改动前完全一致。"""
+        avail = max(1, self.rect.w - 2 * self.PAD)
+        if self.font.size(self.text)[0] <= avail:
+            return self.font
+        size = min(self.size, max(10, self.font.get_height() - 2))
+        while size > 10:
+            trial = pygame.font.SysFont(FONT_NAME, size)
+            if trial.size(self.text)[0] <= avail:
+                return trial
+            size -= 1
+        return pygame.font.SysFont(FONT_NAME, 10)
 
     def draw(self, screen):
         pygame.draw.rect(screen, self.color, self.rect)
-        surf = self.font.render(self.text, True, WHITE)
+        surf = self._font.render(self.text, True, WHITE)
         screen.blit(surf, (self.rect.x + (self.rect.w - surf.get_width()) // 2,
                            self.rect.y + (self.rect.h - surf.get_height()) // 2))
 
