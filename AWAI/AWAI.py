@@ -1532,7 +1532,36 @@ class CommandedController(Controller):
 
 
 class ManualController(Controller):
-    """键盘手动控制（常规模式红方）。"""
+    """键盘手动控制（常规模式红方）。
+
+    键位：
+      W / S        加力 / 减速板
+      A / D        左转 / 右转
+      Q / E        机头向左 / 向右偏一个扇区
+      空格         机炮    M 导弹    B 炸弹    F 诱饵
+      Tab          锁定最近的敌机
+      Y            锁定最近的敌方地面目标
+      U            在敌方目标之间切换锁定
+      C            解除锁定
+
+    目标锁定是**边沿触发**：按一下发一次指令。
+
+    原先这里根本没有锁定键，`target_select` 恒为默认的 LOCK_HOLD，于是
+    `lock_target` 永远是 None，而 `aim_assist()` 第一行就 `return 0.0` ——
+    神经网络和规则 AI 都享有的火控对准辅助，人类玩家一点也享受不到，
+    导弹也没有目标可打。现在用上一帧的按键状态做上升沿检测，
+    避免按住时每帧重复下发锁定指令。
+    """
+
+    # 锁定类按键：只认"本帧刚按下"那一下
+    LOCK_KEYS = ((K_TAB, LOCK_NEAREST_AIR),
+                 (K_y, LOCK_NEAREST_GROUND),
+                 (K_u, LOCK_NEXT),
+                 (K_c, LOCK_CLEAR))
+
+    def __init__(self):
+        self._prev_keys = {}
+
     def decide(self, world, unit):
         keys = pygame.key.get_pressed()
         act = Action()
@@ -1548,6 +1577,12 @@ class ManualController(Controller):
         elif keys[K_m]: act.fire = FIRE_MISSILE
         elif keys[K_b]: act.fire = FIRE_BOMB
         elif keys[K_f]: act.fire = FIRE_FLARE
+        # 上升沿检测：本帧按下、上一帧没按 → 只下发一次锁定指令
+        for key, cmd in self.LOCK_KEYS:
+            now = bool(keys[key])
+            if now and not self._prev_keys.get(key, False):
+                act.target_select = cmd
+            self._prev_keys[key] = now
         return act
 
 
@@ -3466,7 +3501,8 @@ class HUD:
         # ---- 焦点单位面板（优先显示红方长机）----
         focus = reds[0] if reds else (blues[0] if blues else None)
         if focus is not None:
-            self._draw_unit_panel(screen, world, focus, 8, SCREEN_H - 118)
+            # 上移 38px：底部要给常规模式的两行按键提示让位，否则字会叠在一起
+            self._draw_unit_panel(screen, world, focus, 8, SCREEN_H - 156)
 
     def _draw_unit_panel(self, screen, world, a, x, y):
         w, h = 300, 108
@@ -3602,13 +3638,14 @@ class Button:
 def main_menu(screen):
     """主菜单：返回选择的模式字符串。"""
     buttons = [
-        Button(SCREEN_W // 2 - 150, 210, 300, 42, "课程训练（8 阶段渐进）", (0, 150, 0)),
-        Button(SCREEN_W // 2 - 150, 262, 300, 42, "常规模式（手动 vs 规则AI）", GREEN),
-        Button(SCREEN_W // 2 - 150, 314, 300, 42, "AI 训练（PPO 自博弈）", BLUE),
-        Button(SCREEN_W // 2 - 150, 366, 300, 42, "观战模式（模型对战）", ORANGE),
-        Button(SCREEN_W // 2 - 150, 418, 300, 42, "选择地图（8 种现实地形）", (120, 90, 160)),
-        Button(SCREEN_W // 2 - 150, 470, 300, 42, "模型管理", GRAY),
-        Button(SCREEN_W // 2 - 150, 522, 300, 42, "退出", DARK_RED),
+        Button(SCREEN_W // 2 - 170, 200, 340, 42, "部署对战（自编机队）", (0, 150, 0)),
+        Button(SCREEN_W // 2 - 170, 250, 340, 42, "手动驾驶（自己开一架）", GREEN),
+        Button(SCREEN_W // 2 - 170, 300, 340, 42, "课程训练（8 阶段渐进）", (0, 120, 60)),
+        Button(SCREEN_W // 2 - 170, 350, 340, 42, "AI 训练（PPO 自博弈）", BLUE),
+        Button(SCREEN_W // 2 - 170, 400, 340, 42, "观战模式（模型对战）", ORANGE),
+        Button(SCREEN_W // 2 - 170, 450, 340, 42, "选择地图（8 种现实地形）", (120, 90, 160)),
+        Button(SCREEN_W // 2 - 170, 500, 340, 42, "模型管理", GRAY),
+        Button(SCREEN_W // 2 - 170, 550, 340, 42, "退出", DARK_RED),
     ]
     while True:
         screen.fill(WHITE)
@@ -3657,19 +3694,30 @@ def _text_input(screen, prompt, x, y, font=FONT):
 
 
 def training_setup(screen):
-    """训练设置：机型选择 + 模型名。返回 (plane_type, model_name, episodes)。"""
-    plane_types = list(AIRCRAFT_SPECS.keys())[:8]
+    """训练设置：机型选择 + 模型名。返回 (plane_type, model_name, episodes)。
+
+    原先这里写的是 `list(AIRCRAFT_SPECS.keys())[:8]`，而机型其实有 **10** 个 ——
+    于是 missile_plane（导弹飞机）与 attacker_rear（攻击机改）永远选不到。
+    现在列出全部机型。
+    """
+    plane_types = list(AIRCRAFT_SPECS)
     selected = 0
     while True:
         screen.fill(WHITE)
-        title = BIG_FONT.render("AI 训练 - 机型与模型", True, BLACK)
-        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 50))
+        title = BIG_FONT.render("AI 训练 - 选择机型", True, BLACK)
+        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 46))
+        sub = FONT.render(f"共 {len(plane_types)} 个机型", True, GRAY)
+        screen.blit(sub, (SCREEN_W // 2 - sub.get_width() // 2, 92))
         for i, pt in enumerate(plane_types):
-            color = BLUE if i == selected else BLACK
-            txt = FONT.render(f"{AIRCRAFT_SPECS[pt].name} ({pt})", True, color)
-            screen.blit(txt, (200, 150 + i * 30))
-        hint = SMALL_FONT.render("↑/↓ 选择机型    Enter 确认并输入模型名", True, GRAY)
-        screen.blit(hint, (200, 420))
+            y = 130 + i * 30
+            cur = (i == selected)
+            if cur:
+                pygame.draw.rect(screen, (225, 235, 255), (180, y - 3, 520, 28))
+                pygame.draw.rect(screen, BLUE, (180, y - 3, 4, 28))
+            txt = FONT.render(f"{AIRCRAFT_SPECS[pt].name} ({pt})", True, BLUE if cur else BLACK)
+            screen.blit(txt, (196, y))
+        hint = SMALL_FONT.render("↑/↓ 选择机型    Enter 确认并输入模型名    ESC 返回", True, GRAY)
+        screen.blit(hint, (SCREEN_W // 2 - hint.get_width() // 2, 470))
         for event in pygame.event.get():
             if event.type == QUIT:
                 pygame.quit(); sys.exit()
@@ -3688,9 +3736,14 @@ def training_setup(screen):
 
 
 class TrainView:
-    """训练界面：世界渲染 + 实时奖励曲线 + 倍速/暂停/保存。"""
+    """训练界面：世界渲染 + 实时奖励曲线 + 倍速/暂停/保存。
 
-    def __init__(self, screen):
+    watcher=True 时切成"观战"面板：只显示对战的双方模型与观战按键。
+    观战模式复用这个视图，但它的事件循环只认 ESC/F/R —— 不加这个开关，
+    观赏者会看到「P 暂停 / S 保存模型 / 1/2/3 倍速」这些**按了没反应**的提示。
+    """
+
+    def __init__(self, screen, watcher=False):
         self.screen = screen
         self.camera = Camera(SCREEN_W, SCREEN_H)
         self.camera.follow = 'red'
@@ -3702,11 +3755,23 @@ class TrainView:
         self.ep_red, self.ep_blue = 0.0, 0.0
         self.ep = 0
         self.steps = 0
+        self.watcher = watcher
+        self.info_lines = []
+        # 面板标题由调用方设置：观战是"神经网络 vs 神经网络"，
+        # 部署对战可能是"神经网络 vs 硬编码规则AI"，写死会自相矛盾。
+        self.title = '训练进度' if not watcher else '观战'
 
     def draw_curve(self, screen):
         x0, y0, w, h = SCREEN_W - 380, 60, 360, 150
         pygame.draw.rect(screen, (245, 245, 245), (x0, y0, w, h))
         pygame.draw.rect(screen, GRAY, (x0, y0, w, h), 1)
+        if self.watcher:
+            screen.blit(SMALL_FONT.render(self.title, True, BLACK), (x0 + 6, y0 + 4))
+            for k, line in enumerate(self.info_lines[:4]):
+                screen.blit(SMALL_FONT.render(line, True, BLACK), (x0 + 6, y0 + 28 + k * 18))
+            screen.blit(SMALL_FONT.render("ESC 退出  F 跟随  R 重开  滚轮缩放", True, GRAY),
+                        (x0 + 6, y0 + h - 18))
+            return
         surf = SMALL_FONT.render(f"训练进度  Episode {self.ep}", True, BLACK)
         screen.blit(surf, (x0 + 6, y0 + 4))
         # 曲线
@@ -3793,31 +3858,91 @@ def map_setup(screen, title='选择地图'):
 
 
 def watch_setup(screen):
-    """观战设置：选择红/蓝模型。返回 (red_model, blue_model)。"""
+    """观战设置：选择红/蓝模型。返回 (red_model, blue_model)，ESC 则 None。
+
+    两列各自**滚动**，只画看得下的行，选中项加高亮条 + 左侧色条，
+    底部再明确写出"红: X  蓝: Y"，不必靠猜颜色。
+
+    原来的实现按固定 24px 行距平铺全部模型：发布版自带 24 个模型时，
+    红方列表排到 y=702、蓝方排到 y=922，而屏幕只有 800 高 ——
+    **蓝方整个列表在屏幕外，根本选不了**；底部提示文字还被列表压住。
+    """
     models = list_models()
     if not models:
         return None
+
+    ROW_H, PAD = 24, 8
+    TOP, BOTTOM = 168, 596                 # 列表可视区上下边界
+    VISIBLE = max(1, (BOTTOM - TOP) // ROW_H)
+    COL_X = (110, 640)
+
     sel = [0, 0]
+    scroll = [0, 0]
+
+    def follow(col):
+        """让滚动窗口始终包含选中项。"""
+        if len(models) <= VISIBLE:
+            scroll[col] = 0
+            return
+        if sel[col] < scroll[col]:
+            scroll[col] = sel[col]
+        elif sel[col] >= scroll[col] + VISIBLE:
+            scroll[col] = sel[col] - VISIBLE + 1
+        scroll[col] = max(0, min(scroll[col], len(models) - VISIBLE))
+
+    def move(col, delta):
+        sel[col] = (sel[col] + delta) % len(models)
+        follow(col)
+
+    move(0, 0)
+    move(1, 0)
+
     while True:
         screen.fill(WHITE)
-        title = BIG_FONT.render("观战模式 - 选择模型", True, BLACK)
-        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 50))
-        for row, label in ((0, '红方:'), (1, '蓝方:')):
-            y = 150 + row * 220
-            screen.blit(FONT.render(label, True, BLACK), (150, y))
-            for i, m in enumerate(models):
-                color = BLUE if i == sel[row] else BLACK
-                screen.blit(FONT.render(m, True, color), (260, y + i * 24))
-        hint = SMALL_FONT.render("↑/↓ 选择红方  Q/W 选择蓝方  Enter 开始  ESC 返回", True, GRAY)
-        screen.blit(hint, (150, 620))
+        title = BIG_FONT.render("观战模式 - 选择对战的模型", True, BLACK)
+        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 40))
+        sub = FONT.render(f"models/ 里共 {len(models)} 个模型", True, GRAY)
+        screen.blit(sub, (SCREEN_W // 2 - sub.get_width() // 2, 90))
+
+        for col, label, color in ((0, '红方（神经网络）', RED), (1, '蓝方（神经网络）', BLUE)):
+            x = COL_X[col]
+            screen.blit(BIG_FONT.render(label, True, color), (x, TOP - 46))
+            pygame.draw.rect(screen, (245, 247, 250),
+                             (x - PAD, TOP - PAD, 410 + 2 * PAD, VISIBLE * ROW_H + 2 * PAD))
+            for row in range(VISIBLE):
+                i = scroll[col] + row
+                if i >= len(models):
+                    break
+                y = TOP + row * ROW_H
+                cur = (i == sel[col])
+                if cur:
+                    pygame.draw.rect(screen, (205, 222, 255),
+                                     (x - PAD, y - 3, 410 + 2 * PAD, ROW_H))
+                    pygame.draw.rect(screen, color, (x - PAD, y - 3, 4, ROW_H))
+                screen.blit(FONT.render(models[i], True, color if cur else BLACK), (x, y))
+            if len(models) > VISIBLE:
+                info = SMALL_FONT.render(
+                    f"第 {scroll[col] + 1}-{min(scroll[col] + VISIBLE, len(models))} / {len(models)} 个",
+                    True, GRAY)
+                screen.blit(info, (x, BOTTOM + 10))
+
+        line = BIG_FONT.render(f"红: {models[sel[0]]}      蓝: {models[sel[1]]}", True, BLACK)
+        screen.blit(line, (SCREEN_W // 2 - line.get_width() // 2, 686))
+        hint = SMALL_FONT.render(
+            "↑/↓ 选红方      Q/W 选蓝方      PgUp/PgDn 翻蓝方      Enter 开始对战      ESC 返回",
+            True, GRAY)
+        screen.blit(hint, (SCREEN_W // 2 - hint.get_width() // 2, 738))
+
         for event in pygame.event.get():
             if event.type == QUIT:
                 pygame.quit(); sys.exit()
             if event.type == KEYDOWN:
-                if event.key == K_UP: sel[0] = (sel[0] - 1) % len(models)
-                elif event.key == K_DOWN: sel[0] = (sel[0] + 1) % len(models)
-                elif event.key == K_q: sel[1] = (sel[1] - 1) % len(models)
-                elif event.key == K_w: sel[1] = (sel[1] + 1) % len(models)
+                if event.key == K_UP: move(0, -1)
+                elif event.key == K_DOWN: move(0, 1)
+                elif event.key == K_q: move(1, -1)
+                elif event.key == K_w: move(1, 1)
+                elif event.key == K_PAGEUP: move(1, -VISIBLE)
+                elif event.key == K_PAGEDOWN: move(1, VISIBLE)
                 elif event.key == K_RETURN:
                     return models[sel[0]], models[sel[1]]
                 elif event.key == K_ESCAPE:
@@ -3877,6 +4002,20 @@ def _write_modelset(names):
         f.write("# 模型文件列表，每行一个文件名\n")
         for n in names:
             f.write(n + "\n")
+
+
+def _register_modelset(names):
+    """把刚保存的模型登记到 modelset.txt 的**最前面**，并保留原有条目。
+
+    原先 6 处保存点都是 `_write_modelset([xxx_red, xxx_blue])` —— 直接把整个列表
+    覆盖成刚训练的那两个模型，于是**每训练一次就把之前攒的模型列表清空一次**。
+    现在改成合并：新模型在前，其余保留，顺手丢弃已不存在的条目。
+    """
+    merged = list(names)
+    for n in _read_modelset():
+        if n not in merged and os.path.exists(model_path(n)):
+            merged.append(n)
+    _write_modelset(merged)
 
 
 def list_models():
@@ -4013,7 +4152,7 @@ def train_ppo(plane_type, model_name, episodes=200, render=True):
                         elif event.key == K_s:
                             red_agent.save(red_path)
                             blue_agent.save(blue_path)
-                            _write_modelset([model_name + '_red', model_name + '_blue'])
+                            _register_modelset([model_name + '_red', model_name + '_blue'])
                             print(f"[save] 已保存 {red_path} / {blue_path}")
                         elif event.key == K_ESCAPE:
                             pygame.quit(); sys.exit()
@@ -4067,7 +4206,7 @@ def train_ppo(plane_type, model_name, episodes=200, render=True):
         if ep % 10 == 0:
             red_agent.save(red_path)
             blue_agent.save(blue_path)
-            _write_modelset([model_name + '_red', model_name + '_blue'])
+            _register_modelset([model_name + '_red', model_name + '_blue'])
     env.close()
     if render:
         pygame.quit()
@@ -4309,7 +4448,7 @@ class TrainWorker(threading.Thread):
         def do_save():
             for team in ('red', 'blue'):
                 self.agents[team].save(model_path(f"{self.model_name}_{team}"))
-            _write_modelset([f"{self.model_name}_red", f"{self.model_name}_blue"])
+            _register_modelset([f"{self.model_name}_red", f"{self.model_name}_blue"])
             print(f"[bg] 已保存模型 → models/{self.model_name}_red.pt / _blue.pt", flush=True)
 
         try:
@@ -4434,7 +4573,7 @@ class TrainWorker(threading.Thread):
         def do_save():
             for team in ('red', 'blue'):
                 self.agents[team].save(model_path(f"{self.model_name}_{team}"))
-            _write_modelset([f"{self.model_name}_red", f"{self.model_name}_blue"])
+            _register_modelset([f"{self.model_name}_red", f"{self.model_name}_blue"])
             print(f"[bg] 已保存模型 → models/{self.model_name}_red.pt / _blue.pt", flush=True)
 
         def obs_rows(obs, team):
@@ -4810,7 +4949,7 @@ def _run_curriculum_mixed(plane_type, model_prefix, stages, episodes_per_stage,
         src = model_path(f"{model_prefix}_mixed_{team}")
         if os.path.exists(src):
             shutil.copy(src, model_path(f"{model_prefix}_final_{team}"))
-    _write_modelset([f"{model_prefix}_final_red", f"{model_prefix}_final_blue"])
+    _register_modelset([f"{model_prefix}_final_red", f"{model_prefix}_final_blue"])
     print(f"最终模型已保存：models/{model_prefix}_final_red.pt / _blue.pt", flush=True)
     evaluate_curriculum(plane_type, model_prefix)
 
@@ -4950,7 +5089,7 @@ def run_curriculum(plane_type, model_prefix, episodes_per_stage=100, n_envs=2,
             src = model_path(f"{last_ckpt}_{team}")
             if os.path.exists(src):
                 shutil.copy(src, model_path(f"{model_prefix}_final_{team}"))
-    _write_modelset([f"{model_prefix}_final_red", f"{model_prefix}_final_blue"])
+    _register_modelset([f"{model_prefix}_final_red", f"{model_prefix}_final_blue"])
     print(f"最终模型已保存：models/{model_prefix}_final_red.pt / _blue.pt", flush=True)
     evaluate_curriculum(plane_type, model_prefix)
 
@@ -5025,11 +5164,274 @@ def try_load_agent(model_name):
     return agent, f"OK（obs_dim={data.get('obs_dim')} obs_version={ver}）"
 
 
-def run_normal_mode(screen, layout='duel', map_variants=4):
-    """常规模式：红方手动键盘控制 vs 蓝方规则AI（可选现实向地图）。"""
-    world = World('standard', red_ai_factory=lambda: ManualController(),
-                  blue_ai_factory=lambda: RuleAI('blue'), layout=layout,
-                  map_variants=map_variants)
+def deploy_setup(screen):
+    """部署对战设置：编成红蓝双方机队。返回配置元组，ESC 则 None。
+
+    这是"游玩者"管线 —— 你**不开飞机**，而是**部署**飞机：挑机型、数量，
+    以及由「硬编码规则 AI」还是某个神经网络模型来驾驶，然后开战看结果。
+    配置 = (红机型, 红数量下标, 红驾驶员下标, 蓝机型, 蓝数量下标, 蓝驾驶员下标)
+    """
+    planes = list(AIRCRAFT_SPECS)
+    counts = (1, 2, 3, 4, 6, 8)
+    drivers = ['rule'] + list_models()          # 'rule' = 硬编码规则 AI
+
+    sel = [0, 0, 1 if len(drivers) > 1 else 0, 0, 0, 0]
+    row = 0
+    ROW_Y = (186, 226, 266, 348, 388, 428)
+    HEAD_Y = {0: 148, 3: 310}
+    ROW_LABELS = ('机型', '数量', '驾驶员', '机型', '数量', '驾驶员')
+
+    def driver_label(drv):
+        return '硬编码规则AI（专家系统）' if drv == 'rule' else drv
+
+    def row_value(r):
+        if r % 3 == 0:
+            pt = planes[sel[r]]
+            return f"{AIRCRAFT_SPECS[pt].name}   ({pt})"
+        if r % 3 == 1:
+            return f"{counts[sel[r]]} 架"
+        return driver_label(drivers[sel[r]])
+
+    def cycle(r, d):
+        n = (len(planes) if r % 3 == 0 else
+             len(counts) if r % 3 == 1 else len(drivers))
+        sel[r] = (sel[r] + d) % n
+
+    while True:
+        screen.fill(WHITE)
+        title = BIG_FONT.render("部署对战 - 编成你的机队", True, BLACK)
+        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 34))
+        head = FONT.render("↑/↓ 选行      ←/→ 改数值      Enter 开战      ESC 返回", True, GRAY)
+        screen.blit(head, (SCREEN_W // 2 - head.get_width() // 2, 82))
+        note = SMALL_FONT.render(
+            "双方飞机都由 AI 驾驶（硬编码规则AI 或 神经网络模型），你不直接操控", True, GRAY)
+        screen.blit(note, (SCREEN_W // 2 - note.get_width() // 2, 108))
+
+        for h, y in HEAD_Y.items():
+            col = RED if h == 0 else BLUE
+            tag = '红方（我方）' if h == 0 else '蓝方（敌方）'
+            screen.blit(BIG_FONT.render(tag, True, col), (140, y))
+
+        for r in range(6):
+            y = ROW_Y[r]
+            cur = (r == row)
+            col = RED if r < 3 else BLUE
+            if cur:
+                pygame.draw.rect(screen, (225, 235, 255), (240, y - 5, 830, 34))
+                pygame.draw.rect(screen, col, (240, y - 5, 4, 34))
+            screen.blit(FONT.render(ROW_LABELS[r], True, BLACK), (262, y))
+            screen.blit(FONT.render(row_value(r), True, col if cur else BLACK), (360, y))
+
+        # 配置摘要 + 兼容性警告
+        rp, rn, rd, bp, bn, bd = sel
+        rdrv, bdrv = drivers[rd], drivers[bd]
+        summary = (f"红 {counts[rn]}× {AIRCRAFT_SPECS[planes[rp]].name}"
+                   f"（{driver_label(rdrv)}）     vs     "
+                   f"蓝 {counts[bn]}× {AIRCRAFT_SPECS[planes[bp]].name}"
+                   f"（{driver_label(bdrv)}）")
+        s = FONT.render(summary, True, BLACK)
+        screen.blit(s, (SCREEN_W // 2 - s.get_width() // 2, 496))
+
+        warn = ''
+        for drv in (rdrv, bdrv):
+            if drv != 'rule':
+                ok, why = model_status(drv)
+                if not ok:
+                    warn = f"⚠ 驾驶员 {drv} 不可用：{why}"
+                    break
+        if warn:
+            w = FONT.render(warn, True, DARK_RED)
+            screen.blit(w, (SCREEN_W // 2 - w.get_width() // 2, 528))
+        else:
+            tip = SMALL_FONT.render(
+                "提示：飞机全部由 AI 驾驶；开战后 R 重开一局，ESC 返回", True, GRAY)
+            screen.blit(tip, (SCREEN_W // 2 - tip.get_width() // 2, 530))
+
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == KEYDOWN:
+                if event.key == K_UP: row = (row - 1) % 6
+                elif event.key == K_DOWN: row = (row + 1) % 6
+                elif event.key == K_LEFT: cycle(row, -1)
+                elif event.key == K_RIGHT: cycle(row, 1)
+                elif event.key == K_RETURN: return tuple(sel)
+                elif event.key == K_ESCAPE: return None
+        pygame.display.flip()
+        pygame.time.Clock().tick(30)
+
+
+def run_deploy_mode(screen, cfg, layout='duel', map_variants=4):
+    """按部署配置开战：双方飞机全部由 AI 驾驶，玩家负责部署并观察结果。
+
+    神经网络方用各自模型的动作批量推理（与 team_battle_test.py 同一套路径）；
+    规则方走硬编码专家系统。打完后自动重开下一局，方便连续观察编成效果。
+    """
+    planes = list(AIRCRAFT_SPECS)
+    counts = (1, 2, 3, 4, 6, 8)
+    drivers = ['rule'] + list_models()
+    rp, rn, rd, bp, bn, bd = cfg
+    red_pt, blue_pt = planes[rp], planes[bp]
+    red_n, blue_n = counts[rn], counts[bn]
+    red_drv, blue_drv = drivers[rd], drivers[bd]
+
+    def label(drv):
+        return '硬编码规则AI' if drv == 'rule' else drv
+
+    def kind(drv):
+        return CTRL_RULE if drv == 'rule' else CTRL_NEURAL
+
+    agents = {}
+    for team, drv in (('red', red_drv), ('blue', blue_drv)):
+        if drv == 'rule':
+            continue
+        agent, msg = try_load_agent(drv)
+        if agent is None:
+            print(f"[deploy] 驾驶员模型加载失败：{team} {drv}\n{msg}")
+            _modal_message(screen, "驾驶员模型加载失败",
+                           [f"{team}：{drv}", msg.splitlines()[0]])
+            return
+        agents[team] = agent
+        print(f"[deploy] {team} 驾驶员 {drv} 已加载（{msg}）")
+
+    stage = StageSpec(name='deploy', desc='部署对战',
+                      red_team=[(red_pt, kind(red_drv))] * red_n,
+                      blue_team=[(blue_pt, kind(blue_drv))] * blue_n,
+                      layout=layout, max_steps=3600, map_variants=map_variants,
+                      red_spawn=(0.30, 0.5), blue_spawn=(0.70, 0.5))
+    env = CurriculumEnv(stage, render=False)
+    obs = env.reset()
+
+    view = TrainView(screen, watcher=True)
+    view.title = '部署对战（双方均由 AI 驾驶）'
+    view.info_lines = [f"红 {red_n}× {AIRCRAFT_SPECS[red_pt].name}",
+                       f"    驾驶员 {label(red_drv)}",
+                       f"蓝 {blue_n}× {AIRCRAFT_SPECS[blue_pt].name}",
+                       f"    驾驶员 {label(blue_drv)}"]
+    view.camera.follow = 'red'
+    clock = pygame.time.Clock()
+    round_no = 1
+    print(f"[deploy] 第 {round_no} 局：红 {red_n}× {AIRCRAFT_SPECS[red_pt].name}"
+          f"（{label(red_drv)}） vs 蓝 {blue_n}× {AIRCRAFT_SPECS[blue_pt].name}"
+          f"（{label(blue_drv)}）", flush=True)
+    while True:
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == KEYDOWN:
+                if event.key == K_ESCAPE:
+                    return
+                if event.key == K_f:
+                    view.camera.follow = None if view.camera.follow else 'red'
+                if event.key == K_r:
+                    obs = env.reset()
+                    round_no += 1
+                    print(f"[deploy] 第 {round_no} 局开始", flush=True)
+            view.camera.handle(event)
+
+        acts = {}
+        for team in ('red', 'blue'):
+            rows = obs.get(team) or []
+            agent = agents.get(team)
+            if rows and agent is not None:
+                a, _, _ = agent.act_batch(rows, deterministic=True)
+                acts[team] = list(a)
+            else:
+                acts[team] = []
+        obs, rewards, done, _ = env.step(acts)
+        view.ep = env.steps // 500
+        view.steps = env.steps
+        view.draw(env.world)
+        clock.tick(FPS)
+        if done:
+            ra = len(env.world.aircraft_list_of('red'))
+            ba = len(env.world.aircraft_list_of('blue'))
+            verdict = '红方胜' if ba == 0 and ra > 0 else ('蓝方胜' if ra == 0 and ba > 0 else '未分胜负')
+            print(f"[deploy] 第 {round_no} 局结束：{verdict}（红剩 {ra} / 蓝剩 {ba}，"
+                  f"{env.steps} 步）", flush=True)
+            obs = env.reset()
+            round_no += 1
+            print(f"[deploy] 第 {round_no} 局开始", flush=True)
+
+
+def manual_setup(screen):
+    """手动驾驶：挑机型 + 挑僚机数量。返回 (plane_type, wingmen)，ESC 则 None。
+
+    这一条才是"你自己开飞机"：长机由键盘操控，僚机交给规则 AI。
+    只部署、不操控的玩法见 deploy_setup。
+    """
+    plane_types = list(AIRCRAFT_SPECS)
+    wing_opts = (0, 1, 2, 3)
+    sel, wing = 0, 0
+
+    def spec_lines(pt):
+        s = AIRCRAFT_SPECS[pt]
+        return [
+            f"血量 {int(s.max_hp)}    视野 {s.visibility:.0f}    体积 {s.size}    诱饵 {s.flares}",
+            f"机炮 {int(s.gun.damage)} 伤 × 备弹 {s.gun.ammo}   射程 {int(s.gun.range)}   锥角 {s.gun.angle:.0f}°",
+            f"炸弹 {s.bomb.count} 枚（{int(s.bomb.damage)} 伤）    导弹 {s.missile.mtype} × {s.missile.count}",
+            f"巡航速度 {s.flight.cruise_speed:.1f}    转向速率 {s.flight.turn_rate:.1f} °/帧",
+        ]
+
+    while True:
+        screen.fill(WHITE)
+        title = BIG_FONT.render("手动驾驶 - 选择你的座机", True, BLACK)
+        screen.blit(title, (SCREEN_W // 2 - title.get_width() // 2, 28))
+        head = FONT.render("↑/↓ 选机型     ←/→ 选僚机数量     Enter 起飞     ESC 返回", True, GRAY)
+        screen.blit(head, (SCREEN_W // 2 - head.get_width() // 2, 74))
+
+        for i, pt in enumerate(plane_types):
+            y = 112 + i * 28
+            cur = (i == sel)
+            if cur:
+                pygame.draw.rect(screen, (225, 235, 255), (130, y - 3, 430, 26))
+                pygame.draw.rect(screen, BLUE, (130, y - 3, 4, 26))
+            screen.blit(FONT.render(f"{AIRCRAFT_SPECS[pt].name} ({pt})",
+                                    True, BLUE if cur else BLACK), (144, y))
+
+        pt = plane_types[sel]
+        screen.blit(BIG_FONT.render(AIRCRAFT_SPECS[pt].name, True, BLACK), (620, 108))
+        for k, line in enumerate(spec_lines(pt)):
+            screen.blit(FONT.render(line, True, BLACK), (620, 152 + k * 26))
+
+        screen.blit(BIG_FONT.render("僚机（同机型 · 规则AI）", True, BLACK), (620, 284))
+        for k, n in enumerate(wing_opts):
+            x = 620 + k * 92
+            cur = (k == wing)
+            pygame.draw.rect(screen, BLUE if cur else (190, 190, 190), (x, 330, 76, 34),
+                             0 if cur else 2)
+            lab = FONT.render(f"{n} 架", True, WHITE if cur else BLACK)
+            screen.blit(lab, (x + (76 - lab.get_width()) // 2,
+                              330 + (34 - lab.get_height()) // 2))
+        screen.blit(FONT.render(f"总计出战 {1 + wing_opts[wing]} 架（你驾驶长机）", True, GRAY),
+                    (620, 378))
+        screen.blit(SMALL_FONT.render("僚机由规则 AI 驾驶", True, GRAY), (620, 410))
+        screen.blit(SMALL_FONT.render("起飞后：Tab 锁定敌机，机炮会自动对提前点修正", True, GRAY),
+                    (620, 432))
+
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == KEYDOWN:
+                if event.key == K_UP: sel = (sel - 1) % len(plane_types)
+                elif event.key == K_DOWN: sel = (sel + 1) % len(plane_types)
+                elif event.key == K_LEFT: wing = (wing - 1) % len(wing_opts)
+                elif event.key == K_RIGHT: wing = (wing + 1) % len(wing_opts)
+                elif event.key == K_RETURN: return plane_types[sel], wing_opts[wing]
+                elif event.key == K_ESCAPE: return None
+        pygame.display.flip()
+        pygame.time.Clock().tick(30)
+
+
+def run_normal_mode(screen, plane_type='standard', layout='duel', map_variants=4, wingmen=0):
+    """常规模式：你驾驶长机（可带规则 AI 僚机）对阵蓝方规则 AI。
+
+    相机跟随切换改用 **V** 键：F 已经是投诱饵，原来这两个功能都绑在 F 上（一键双绑）。
+    """
+    red_slots = [(plane_type, lambda: ManualController())]
+    red_slots += [(plane_type, lambda: RuleAI('red')) for _ in range(max(0, wingmen))]
+    world = World(plane_type, red_slots=red_slots, blue_ai_factory=lambda: RuleAI('blue'),
+                  layout=layout, map_variants=map_variants)
     camera = Camera(SCREEN_W, SCREEN_H)
     camera.follow = 'red'
     hud = HUD()
@@ -5044,7 +5446,7 @@ def run_normal_mode(screen, layout='duel', map_variants=4):
             if event.type == KEYDOWN:
                 if event.key == K_ESCAPE:
                     running = False
-                if event.key == K_f:
+                if event.key == K_v:          # V 跟随（F 留给诱饵，避免一键双绑）
                     camera.follow = None if camera.follow else 'red'
                 if event.key == K_r:          # R 换一局（同地图变体随机）
                     world.reset()
@@ -5062,16 +5464,25 @@ def run_normal_mode(screen, layout='duel', map_variants=4):
         hud.draw(screen, world)
         minimap.draw(screen, world)
         cn = REALISTIC_MAPS.get(layout, (layout, '', 1))[0]
-        hint = SMALL_FONT.render(
-            f"[{cn}] W/S 油门  A/D 转向  Q/E 转头  SPACE 机炮  M 导弹  B 炸弹  F 诱饵  "
-            f"R 重开(第{run_no}局)  滚轮缩放  中键拖动  F 跟随  ESC 返回",
+        # 分两行画：挤成一行会超出 1200px 宽度，尾部按键提示被切掉
+        line1 = SMALL_FONT.render(
+            f"[{cn}]  W/S 油门   A/D 转向   Q/E 转头   空格 机炮   M 导弹   B 炸弹   F 诱饵",
             True, BLACK)
-        screen.blit(hint, (10, SCREEN_H - 24))
+        line2 = SMALL_FONT.render(
+            f"Tab 锁定敌机   Y 锁定地面   U 换目标   C 解除锁定   |   "
+            f"V 跟随   R 重开（第{run_no}局）   滚轮缩放   中键拖动   ESC 返回",
+            True, BLACK)
+        screen.blit(line1, (10, SCREEN_H - 42))
+        screen.blit(line2, (10, SCREEN_H - 24))
         pygame.display.flip()
         clock.tick(FPS)
         lost = world.base_destroyed()
         if lost:
             print(f"基地被摧毁：{lost} 方落败")
+            running = False
+        elif not world.aircraft_list_of('red'):
+            # 己方飞机全灭就结束，否则玩家只能对着空战场发呆
+            print("己方飞机全部被击落")
             running = False
 
 
@@ -5089,7 +5500,9 @@ def run_watch_mode(screen, red_model, blue_model, layout='duel', map_variants=4)
     env = AirCombatEnv('standard', render=False, red_ai_factory=lambda: CommandedController(),
                        blue_ai_factory=lambda: CommandedController(), layout=layout,
                        map_variants=map_variants)
-    view = TrainView(screen)
+    view = TrainView(screen, watcher=True)
+    view.title = '观战：神经网络 vs 神经网络'
+    view.info_lines = [f"红 {red_model}", f"蓝 {blue_model}"]
     view.camera.follow = 'red'
     clock = pygame.time.Clock()
     obs = env.reset()
@@ -5210,8 +5623,15 @@ def main():
     map_layout, map_variants = 'duel', 4
     while True:
         choice = main_menu(screen)
-        if choice == '常规模式':
-            run_normal_mode(screen, map_layout, map_variants)
+        if choice == '部署对战':
+            cfg = deploy_setup(screen)
+            if cfg:
+                run_deploy_mode(screen, cfg, map_layout, map_variants)
+            screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+        elif choice == '手动驾驶':
+            sel = manual_setup(screen)
+            if sel:
+                run_normal_mode(screen, sel[0], map_layout, map_variants, sel[1])
             screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
         elif choice == 'AI 训练':
             setup = training_setup(screen)
